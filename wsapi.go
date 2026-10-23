@@ -310,6 +310,18 @@ func (s *Session) listen(wsConn *websocket.Conn, listening <-chan interface{}) {
 	}
 }
 
+type heartbeatOp struct {
+	Op   int   `json:"op"`
+	Data int64 `json:"d"`
+}
+
+func (s *Session) newHeartbeatOp(seq int64) interface{} {
+	if s.IsUser {
+		return newForegroundedQosHeartbeatOp(seq)
+	}
+	return heartbeatOp{Op: 1, Data: seq}
+}
+
 func newForegroundedQosHeartbeatOp(seq int64) qosHeartbeatOp {
 	return qosHeartbeatOp{
 		Op: 40,
@@ -388,7 +400,7 @@ func (s *Session) heartbeat(wsConn *websocket.Conn, listening <-chan interface{}
 		s.log(LogDebug, "sending gateway websocket heartbeat seq %d", sequence)
 		s.wsMutex.Lock()
 		s.LastHeartbeatSent = time.Now().UTC()
-		err = wsConn.WriteJSON(newForegroundedQosHeartbeatOp(sequence))
+		err = wsConn.WriteJSON(s.newHeartbeatOp(sequence))
 		s.wsMutex.Unlock()
 		if err != nil || time.Now().UTC().Sub(last) > (heartbeatIntervalMsec*FailedHeartbeatAcks) {
 			if err != nil {
@@ -754,7 +766,7 @@ func (s *Session) onEvent(messageType int, message []byte, isOnConnect bool) (*E
 	if e.Operation == 1 {
 		s.log(LogInformational, "sending heartbeat in response to Op1")
 		s.wsMutex.Lock()
-		err = s.wsConn.WriteJSON(newForegroundedQosHeartbeatOp(atomic.LoadInt64(s.sequence)))
+		err = s.wsConn.WriteJSON(s.newHeartbeatOp(atomic.LoadInt64(s.sequence)))
 		s.wsMutex.Unlock()
 		if err != nil {
 			s.log(LogError, "error sending heartbeat in response to Op1")
