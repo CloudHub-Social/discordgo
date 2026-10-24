@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"sync/atomic"
 	"time"
 
@@ -49,8 +50,10 @@ func (s *Session) closeZLib() {
 	if s.zlibReader != nil {
 		_ = s.zlibReader.Close()
 	}
-	if s.zlibReader != nil {
+	if s.zlibPipeReader != nil {
 		_ = s.zlibPipeReader.Close()
+	}
+	if s.zlibPipeWriter != nil {
 		_ = s.zlibPipeWriter.Close()
 	}
 	s.zlibJSON = nil
@@ -58,6 +61,8 @@ func (s *Session) closeZLib() {
 	s.zlibPipeWriter = nil
 	s.zlibReader = nil
 }
+
+const defaultGatewayHandshakeTimeout = 60 * time.Second
 
 // Open creates a websocket connection to Discord.
 // See: https://discord.com/developers/docs/topics/gateway#connecting
@@ -123,6 +128,38 @@ func (s *Session) Open() error {
 			s.wsConn.Close()
 			s.wsConn = nil
 			s.closeZLib()
+		}
+	}()
+
+	// The HTTP upgrade timeout does not cover Discord's HELLO/READY exchange.
+	// Bound reads and writes while Open holds the session lock so a silent
+	// peer cannot prevent the caller from recovering or shutting down.
+	handshakeTimeout := s.GatewayHandshakeTimeout
+	if handshakeTimeout <= 0 {
+		handshakeTimeout = defaultGatewayHandshakeTimeout
+	}
+	deadline := time.Now().Add(handshakeTimeout)
+	if err = s.wsConn.SetReadDeadline(deadline); err != nil {
+		return err
+	}
+	if err = s.wsConn.SetWriteDeadline(deadline); err != nil {
+		return err
+	}
+
+	// A partial zlib-stream payload can also block in the decoder's pipe
+	// after ReadMessage returned. Closing that pipe releases the decoder.
+	// Capture this attempt's writer and join the callback before cleanup or
+	// normal listening, so a late timer cannot affect a subsequent connection.
+	zlibWriter := s.zlibPipeWriter
+	timeoutDone := make(chan struct{})
+	timeoutStopped := false
+	handshakeTimer := time.AfterFunc(time.Until(deadline), func() {
+		_ = zlibWriter.CloseWithError(os.ErrDeadlineExceeded)
+		close(timeoutDone)
+	})
+	defer func() {
+		if !timeoutStopped && !handshakeTimer.Stop() {
+			<-timeoutDone
 		}
 	}()
 
@@ -224,6 +261,22 @@ func (s *Session) Open() error {
 		s.log(LogWarning, "Expected READY/RESUMED, instead got:\n%#v\n", e)
 	}
 	//s.log(LogInformational, "First Packet:\n%#v\n", e)
+
+	if !handshakeTimer.Stop() {
+		<-timeoutDone
+		err = os.ErrDeadlineExceeded
+		return err
+	}
+	timeoutStopped = true
+
+	// Normal gateway liveness is maintained by heartbeat ACKs. Do not let the
+	// initial handshake deadline expire underneath the listener or its writes.
+	if err = s.wsConn.SetReadDeadline(time.Time{}); err != nil {
+		return err
+	}
+	if err = s.wsConn.SetWriteDeadline(time.Time{}); err != nil {
+		return err
+	}
 
 	s.log(LogInformational, "We are now connected to Discord, emitting connect event")
 	s.handleEvent(connectEventType, &Connect{})
@@ -731,8 +784,10 @@ func (s *Session) onEvent(messageType int, message []byte, isOnConnect bool) (*E
 
 	// If this is a compressed message, uncompress it.
 	if messageType == websocket.BinaryMessage {
+		// Cleanup may clear the session field before this goroutine is scheduled.
+		writer := s.zlibPipeWriter
 		go func() {
-			_, innerErr := s.zlibPipeWriter.Write(message)
+			_, innerErr := writer.Write(message)
 			if innerErr != nil {
 				s.log(LogError, "error writing websocket message to zlib pipe: %v", innerErr)
 			}

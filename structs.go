@@ -103,6 +103,10 @@ type Session struct {
 	// The dialer used for WebSocket connection
 	Dialer *websocket.Dialer
 
+	// GatewayHandshakeTimeout bounds HELLO/READY exchange after the WebSocket upgrade.
+	// Non-positive values use the default of 60 seconds. Set before Open.
+	GatewayHandshakeTimeout time.Duration
+
 	// The user agent used for REST APIs
 	UserAgent string
 
