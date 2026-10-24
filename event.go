@@ -102,12 +102,14 @@ func (s *Session) addEventHandlerOnce(eventHandler EventHandler) func() {
 // to a struct corresponding to the event for which you want to listen.
 //
 // eg:
-//     Session.AddHandler(func(s *discordgo.Session, m *discordgo.MessageCreate) {
-//     })
+//
+//	Session.AddHandler(func(s *discordgo.Session, m *discordgo.MessageCreate) {
+//	})
 //
 // or:
-//     Session.AddHandler(func(s *discordgo.Session, m *discordgo.PresenceUpdate) {
-//     })
+//
+//	Session.AddHandler(func(s *discordgo.Session, m *discordgo.PresenceUpdate) {
+//	})
 //
 // List of events can be found at this page, with corresponding names in the
 // library for each event: https://discord.com/developers/docs/topics/gateway#event-names
@@ -164,42 +166,34 @@ func (s *Session) removeEventHandlerInstance(t string, ehi *eventHandlerInstance
 
 // Handles calling permanent and once handlers for an event type.
 func (s *Session) handle(t string, i interface{}) {
-	for _, eh := range s.handlers[t] {
+	// Snapshot and consume once-handlers under the lock, but never invoke user
+	// callbacks while holding it: synchronous handlers may remove themselves.
+	s.handlersMu.Lock()
+	handlers := append([]*eventHandlerInstance(nil), s.handlers[t]...)
+	handlers = append(handlers, s.onceHandlers[t]...)
+	if len(s.onceHandlers[t]) > 0 {
+		s.onceHandlers[t] = nil
+	}
+	s.handlersMu.Unlock()
+	for _, eh := range handlers {
 		if s.SyncEvents {
 			eh.eventHandler.Handle(s, i)
 		} else {
 			go eh.eventHandler.Handle(s, i)
 		}
 	}
-
-	if len(s.onceHandlers[t]) > 0 {
-		for _, eh := range s.onceHandlers[t] {
-			if s.SyncEvents {
-				eh.eventHandler.Handle(s, i)
-			} else {
-				go eh.eventHandler.Handle(s, i)
-			}
-		}
-		s.onceHandlers[t] = nil
-	}
 }
 
-// Handles an event type by calling internal methods, firing handlers and firing the
-// interface{} event.
+// handleEvent updates internal state before dispatching to the configured
+// callback, or to legacy handlers when no callback has been configured.
 func (s *Session) handleEvent(t string, i interface{}) {
-	//s.handlersMu.RLock()
-	//defer s.handlersMu.RUnlock()
-
-	// All events are dispatched internally first.
 	s.onInterface(i)
-
-	s.EventHandler(i)
-
-	// Then they are dispatched to anyone handling interface{} events.
-	//s.handle(interfaceEventType, i)
-
-	// Finally they are dispatched to any typed handlers.
-	//s.handle(t, i)
+	if s.EventHandler != nil {
+		s.EventHandler(i)
+		return
+	}
+	s.handle(interfaceEventType, i)
+	s.handle(t, i)
 }
 
 // setGuildIds will set the GuildID on all the members of a guild.

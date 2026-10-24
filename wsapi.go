@@ -107,7 +107,7 @@ func (s *Session) Open() error {
 
 	s.wsConn, _, err = s.Dialer.Dial(s.gateway, header)
 	if err != nil {
-		s.log(LogError, "error connecting to gateway %s, %s", s.gateway, err)
+		s.logGatewayDiagnostic("connect_error", err)
 		if !s.noClearGateway {
 			s.gateway = "" // clear cached gateway
 		}
@@ -322,7 +322,7 @@ func (s *Session) listen(wsConn *websocket.Conn, listening <-chan interface{}) {
 
 			if sameConnection {
 
-				s.log(LogWarning, "error reading from gateway %s websocket, %s", s.gateway, err)
+				s.logGatewayDiagnostic("read_error", err)
 
 				wsCloseErr := &websocket.CloseError{}
 				if !errors.As(err, &wsCloseErr) {
@@ -457,9 +457,9 @@ func (s *Session) heartbeat(wsConn *websocket.Conn, listening <-chan interface{}
 		s.wsMutex.Unlock()
 		if err != nil || time.Now().UTC().Sub(last) > (heartbeatIntervalMsec*FailedHeartbeatAcks) {
 			if err != nil {
-				s.log(LogError, "error sending heartbeat to gateway %s, %s", s.gateway, err)
+				s.logGatewayDiagnostic("heartbeat_write_error", err)
 			} else {
-				s.log(LogError, "haven't gotten a heartbeat ACK in %v, triggering a reconnection", time.Now().UTC().Sub(last))
+				s.logGatewayDiagnostic("heartbeat_ack_timeout", nil)
 			}
 			s.Close()
 			s.reconnect()
@@ -824,7 +824,7 @@ func (s *Session) onEvent(messageType int, message []byte, isOnConnect bool) (*E
 		err = s.wsConn.WriteJSON(s.newHeartbeatOp(atomic.LoadInt64(s.sequence)))
 		s.wsMutex.Unlock()
 		if err != nil {
-			s.log(LogError, "error sending heartbeat in response to Op1")
+			s.logGatewayDiagnostic("heartbeat_write_error", err)
 			return e, err
 		}
 
@@ -834,6 +834,7 @@ func (s *Session) onEvent(messageType int, message []byte, isOnConnect bool) (*E
 	// Reconnect
 	// Must immediately disconnect from gateway and reconnect to new gateway.
 	if e.Operation == 7 {
+		s.logGatewayDiagnostic("server_reconnect", nil)
 		if isOnConnect {
 			s.log(LogInformational, "Got Op7 in connect handler, returning error")
 			return e, ErrImmediateDisconnect
@@ -848,6 +849,7 @@ func (s *Session) onEvent(messageType int, message []byte, isOnConnect bool) (*E
 	// Invalid Session
 	// Must respond with a Identify packet.
 	if e.Operation == 9 {
+		s.logGatewayDiagnostic("invalid_session", nil)
 
 		s.log(LogInformational, "sending identify packet to gateway in response to Op9")
 
@@ -869,7 +871,7 @@ func (s *Session) onEvent(messageType int, message []byte, isOnConnect bool) (*E
 		s.Lock()
 		s.LastHeartbeatAck = time.Now().UTC()
 		s.Unlock()
-		s.log(LogDebug, "got heartbeat ACK")
+		s.log(LogInformational, "gateway_health heartbeat_ack=true")
 		return e, nil
 	}
 
