@@ -742,10 +742,37 @@ func (s *Session) MarkViewing(channelID string) (err error) {
 	}
 
 	s.wsMutex.Lock()
-	err = s.wsConn.WriteJSON(markViewingOp{13, markViewingData{channelID}})
+	err = writeCallSnapshotRequest(s.wsConn, channelID)
 	s.wsMutex.Unlock()
 
 	return
+}
+
+// A stalled gateway write must not hold Session.RLock indefinitely: Close
+// needs the write lock to tear the connection down. A timed-out Gorilla
+// websocket is unusable, so close it to wake the reader and trigger recovery.
+const callSnapshotWriteTimeout = 10 * time.Second
+
+type callSnapshotWriter interface {
+	SetWriteDeadline(time.Time) error
+	WriteJSON(interface{}) error
+	Close() error
+}
+
+func writeCallSnapshotRequest(conn callSnapshotWriter, channelID string) error {
+	if err := conn.SetWriteDeadline(time.Now().Add(callSnapshotWriteTimeout)); err != nil {
+		_ = conn.Close()
+		return err
+	}
+	if err := conn.WriteJSON(markViewingOp{13, markViewingData{channelID}}); err != nil {
+		_ = conn.Close()
+		return err
+	}
+	if err := conn.SetWriteDeadline(time.Time{}); err != nil {
+		_ = conn.Close()
+		return err
+	}
+	return nil
 }
 
 func (s *Session) SubscribeGuild(dat GuildSubscribeData) (err error) {
